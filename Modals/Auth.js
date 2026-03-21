@@ -6,6 +6,12 @@ const userschema = mongoose.Schema({
   channelname: { type: String },
   description: { type: String },
   image: { type: String },
+  phone: { type: String, default: "" },
+  plan: { type: String, enum: ["free", "bronze", "silver", "gold", "premium"], default: "free" },
+  planExpiry: { type: Date, default: null },
+  downloadsToday: { type: Number, default: 0 },
+  lastDownloadDate: { type: Date, default: null },
+  otpVerified: { type: Boolean, default: false },
   joinedon: { type: Date, default: Date.now },
 });
 
