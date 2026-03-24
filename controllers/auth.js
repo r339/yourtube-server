@@ -1,7 +1,6 @@
 import mongoose from "mongoose";
 import users from "../Modals/Auth.js";
 import nodemailer from "nodemailer";
-import Razorpay from "razorpay";
 import crypto from "crypto";
 
 const transporter = nodemailer.createTransport({
@@ -12,20 +11,11 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || "rzp_test_placeholder",
-  key_secret: process.env.RAZORPAY_KEY_SECRET || "placeholder",
-});
-
-const PLAN_PRICES = { bronze: 1000, silver: 5000, gold: 10000 }; // in paise (₹10, ₹50, ₹100)
-
 export const login = async (req, res) => {
   const { email, name, image } = req.body;
   if (!email) return res.status(400).json({ message: "Email is required" });
-
   try {
     const existingUser = await users.findOne({ email });
-
     if (!existingUser) {
       const newUser = await users.create({ email, name, image });
       return res.status(201).json({ result: newUser });
@@ -44,11 +34,9 @@ export const login = async (req, res) => {
 export const updateprofile = async (req, res) => {
   const { id: _id } = req.params;
   const { channelname, description, phone } = req.body;
-
   if (!mongoose.Types.ObjectId.isValid(_id)) {
     return res.status(400).json({ message: "Invalid user ID" });
   }
-
   try {
     const updatedata = await users.findByIdAndUpdate(
       _id,
@@ -77,65 +65,31 @@ export const getuserbyid = async (req, res) => {
   }
 };
 
-// Create Razorpay order for plan upgrade
-export const createplanorder = async (req, res) => {
-  const { plan } = req.body;
-  if (!["bronze", "silver", "gold", "premium"].includes(plan)) {
-    return res.status(400).json({ message: "Invalid plan" });
-  }
-  const amount = plan === "premium" ? 9900 : PLAN_PRICES[plan]; // premium = ₹99
-  try {
-    const order = await razorpay.orders.create({
-      amount,
-      currency: "INR",
-      receipt: `plan_${plan}_${Date.now()}`,
-      notes: { plan },
-    });
-    return res.status(200).json({ order, key: process.env.RAZORPAY_KEY_ID });
-  } catch (error) {
-    console.error("Create plan order error:", error);
-    return res.status(500).json({ message: "Failed to create payment order" });
-  }
-};
-
-// Verify payment and upgrade plan
+// Upgrade plan — called after successful custom payment on frontend
 export const upgradeplan = async (req, res) => {
-  const {
-    userid,
-    plan,
-    razorpay_order_id,
-    razorpay_payment_id,
-    razorpay_signature,
-  } = req.body;
+  const { userid, plan } = req.body;
 
   if (!mongoose.Types.ObjectId.isValid(userid)) {
     return res.status(400).json({ message: "Invalid user ID" });
   }
+  if (!["bronze", "silver", "gold", "premium"].includes(plan)) {
+    return res.status(400).json({ message: "Invalid plan" });
+  }
 
   try {
-    // Verify Razorpay signature
-    const body = razorpay_order_id + "|" + razorpay_payment_id;
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET || "placeholder")
-      .update(body)
-      .digest("hex");
-
-    if (expectedSignature !== razorpay_signature) {
-      return res.status(400).json({ message: "Payment verification failed" });
-    }
-
-    // Upgrade user plan (set 30-day expiry)
     const expiry = new Date();
     expiry.setDate(expiry.getDate() + 30);
+
     const updatedUser = await users.findByIdAndUpdate(
       userid,
       { $set: { plan, planExpiry: expiry } },
       { new: true }
     );
-
     if (!updatedUser) return res.status(404).json({ message: "User not found" });
 
-    // Send invoice email
+    // Generate a simple transaction ID
+    const txnId = "TXN" + crypto.randomBytes(6).toString("hex").toUpperCase();
+
     const planPrices = { bronze: "₹10", silver: "₹50", gold: "₹100", premium: "₹99" };
     const planLimits = {
       bronze: "7 minutes per video",
@@ -144,6 +98,7 @@ export const upgradeplan = async (req, res) => {
       premium: "Unlimited downloads",
     };
 
+    // Send invoice email
     await transporter.sendMail({
       from: `"YourTube" <${process.env.EMAIL_USER}>`,
       to: updatedUser.email,
@@ -153,20 +108,20 @@ export const upgradeplan = async (req, res) => {
           <h2 style="color:#ff0000">YourTube — Payment Invoice</h2>
           <hr/>
           <table style="width:100%;border-collapse:collapse">
-            <tr><td style="padding:8px 0;color:#888">Customer</td><td style="padding:8px 0"><b>${updatedUser.name}</b></td></tr>
-            <tr><td style="padding:8px 0;color:#888">Email</td><td style="padding:8px 0">${updatedUser.email}</td></tr>
-            <tr><td style="padding:8px 0;color:#888">Plan</td><td style="padding:8px 0"><b>${plan.toUpperCase()}</b></td></tr>
-            <tr><td style="padding:8px 0;color:#888">Amount Paid</td><td style="padding:8px 0"><b>${planPrices[plan]}</b></td></tr>
-            <tr><td style="padding:8px 0;color:#888">Benefits</td><td style="padding:8px 0">${planLimits[plan]}</td></tr>
-            <tr><td style="padding:8px 0;color:#888">Valid Until</td><td style="padding:8px 0">${expiry.toDateString()}</td></tr>
-            <tr><td style="padding:8px 0;color:#888">Payment ID</td><td style="padding:8px 0;font-family:monospace;font-size:12px">${razorpay_payment_id}</td></tr>
+            <tr><td style="padding:8px 0;color:#888">Customer</td><td><b>${updatedUser.name}</b></td></tr>
+            <tr><td style="padding:8px 0;color:#888">Email</td><td>${updatedUser.email}</td></tr>
+            <tr><td style="padding:8px 0;color:#888">Plan</td><td><b>${plan.toUpperCase()}</b></td></tr>
+            <tr><td style="padding:8px 0;color:#888">Amount Paid</td><td><b>${planPrices[plan]}</b></td></tr>
+            <tr><td style="padding:8px 0;color:#888">Benefits</td><td>${planLimits[plan]}</td></tr>
+            <tr><td style="padding:8px 0;color:#888">Valid Until</td><td>${expiry.toDateString()}</td></tr>
+            <tr><td style="padding:8px 0;color:#888">Transaction ID</td><td style="font-family:monospace;font-size:12px">${txnId}</td></tr>
           </table>
           <hr/>
-          <p style="color:#888;font-size:12px">Thank you for upgrading your YourTube plan! Enjoy your benefits.</p>
+          <p style="color:#888;font-size:12px">Thank you for upgrading your YourTube plan!</p>
         </div>`,
-    }).catch((e) => console.error("Email send error:", e));
+    }).catch((e) => console.error("Invoice email error:", e));
 
-    return res.status(200).json({ success: true, user: updatedUser });
+    return res.status(200).json({ success: true, user: updatedUser, txnId });
   } catch (error) {
     console.error("Upgrade plan error:", error);
     return res.status(500).json({ message: "Something went wrong" });
